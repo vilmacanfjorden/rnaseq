@@ -4,22 +4,22 @@ import os
 
 # Wrapper for STAR alignment, HTseq-counts and DESeq2
 import modules.alignment as align
-import modules.samtools as samtools
+import modules.samtools as sam
 import modules.count as count
 
 # STAR alignment
-def alignment(args):
-    align.alignment(args)
+def alignment(args,f):
+    align.alignment(args,f)
 
 
 # Samtools index
 def index(args):
-    samtools.samtools(args)
+    sam.samtools(args)
 
 
 # HTseq count
-def counts(args):
-    count.count(args)
+def counts(args,f):
+    count.count(args,f)
 
 
 # Merge count files
@@ -34,7 +34,7 @@ def deseq(args):
 
 
 def arg():
-    parser = argparse.ArgumentParser(prog=sys.argv[0], description="wrapper for RNAseq")
+    parser = argparse.ArgumentParser(description="wrapper for RNAseq")
     parser.add_argument("-v", "--verbose", action="store_true", help="Be more verbose")
     parser.add_argument("-p", "--samples", help="Path to diretory with diretories of samples")
     parser.add_argument("-b", "--bind", help="Path to diretory with diretories to include in singularity")
@@ -55,10 +55,9 @@ def main():
     # Loop through all sample directories 
     for f in glob.glob(f"{args.samples}/*", recursive=True):
         os.chdir(os.path.abspath(f))
-
         alignment(args,f) # Align fastq files using STAR
-        samtools(args) # Index bam files using samtools
-        counts(args) # Create counts with Htseq count
+        index(args) # Index bam files using samtools
+        counts(args,f) # Create counts with Htseq count
 
 
 if __name__ == "__main__":
