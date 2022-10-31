@@ -1,0 +1,50 @@
+Bootstrap: library
+From: centos:7
+Stage: build
+
+%post
+# Install python3 and other requirements for git and pip3
+#yum install -y python39
+#yum install -y python3-pip
+yum -y groupinstall "Development Tools"
+yum -y install zlib-devel
+yum -y install wget 
+
+# Install miniconda
+wget https://repo.anaconda.com/miniconda/Miniconda3-py38_4.8.2-Linux-x86_64.sh -O Miniconda3_py38_4.8.2-Linux-x86_64.sh 
+bash /Miniconda3_py38_4.8.2-Linux-x86_64.sh -bf -p /usr/miniconda3/
+rm /Miniconda3_py38_4.8.2-Linux-x86_64.sh
+
+export PATH=/usr/miniconda3/bin:$PATH
+
+conda config --add channels defaults
+conda config --add channels bioconda
+conda config --add channels conda-forge
+conda config --set channel_priority false
+
+# Install HTseq
+conda install htseq
+conda install samtools
+
+# Get STAR
+#wget https://github.com/alexdobin/STAR/archive/2.7.10a.tar.gz
+git clone https://github.com/alexdobin/STAR.git
+
+#- Unzip using tar
+#tar -xzf 2.7.10a.tar.gz
+
+# Compile 
+cd STAR/source 
+make STAR 
+
+# Install vim
+#yum install -y vim
+
+
+%runscript
+#exec /STAR/source/STAR "$@"
+exec "$@"
+
+%labels
+    Author Vilma Canfjorden
+    Version v0.0.1
