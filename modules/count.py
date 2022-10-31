@@ -2,7 +2,7 @@ import subprocess
 import glob
 import os
 
-def count(args):
+def count(args,f):
     # Filename of output file with counts
     filename = f"{args.outputdir}/results/"+os.path.basename(f)+".counts"
 
@@ -10,7 +10,7 @@ def count(args):
     cmd = (f"singularity run --bind {args.bind} {args.singularity} /usr/miniconda3/bin/htseq-count -m union -r pos -a 10 --stranded=no -f bam -r pos Aligned.sortedByCoord.out.bam {gtf} > {filename}")
 
     # Count file
-    log_file = open('count.log','a')
+    log_file = open("rna_pipeline.log", "a")
     print("Counting...")
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=log_file, shell=True)
     while process.wait() is None:
