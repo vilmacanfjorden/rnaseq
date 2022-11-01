@@ -6,6 +6,8 @@ import os
 import modules.alignment as align
 import modules.samtools as sam
 import modules.count as count
+import modules.merge_counts as mc
+
 
 # STAR alignment
 def alignment(args,f):
@@ -24,8 +26,7 @@ def counts(args,f):
 
 # Merge count files
 def merge_counts(args):
-    # Merge the count files for prep to DESeq2
-    pass
+    mc.merge_counts(args)  # Merge the count files for prep to DESeq2
 
 
 def deseq(args):
@@ -58,7 +59,7 @@ def main():
         alignment(args,f) # Align fastq files using STAR
         index(args) # Index bam files using samtools
         counts(args,f) # Create counts with Htseq count
-
+    merge_counts(args) # Merge count files
 
 if __name__ == "__main__":
     main()
