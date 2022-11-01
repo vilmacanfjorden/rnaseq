@@ -9,7 +9,7 @@ def samtools(args):
 
     # Index bam file
     print("Indexing bamfiles...")
-    log_file = open("rna_pipline.log","a")
+    log_file = open("rna_pipeline.log","a")
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=log_file)
     while process.wait() is None:
         pass
