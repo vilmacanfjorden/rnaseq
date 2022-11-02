@@ -1,3 +1,5 @@
+:warning: The pipeline does not include DESeq2 at the moment, it has to be run separate :warning:
+
 # RNAseq project
 
 ___
