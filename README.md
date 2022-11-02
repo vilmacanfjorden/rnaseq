@@ -10,8 +10,9 @@ ___
 
 ## How to run
 ___
-- Clone this repository
-- Download singularity image
+* Clone this repository
+* Download singularity image
+  - The singularity image contains STAR, samtools and HTSeq, the only thing you need to fix is an environment that contains `pandas` 
 
 ### Run
 ___
