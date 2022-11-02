@@ -13,8 +13,26 @@ ___
 - Clone this repository
 - Download singularity image
 
-### run
+### Run
+___
 `python3 wrapper.py --samples [PATH_TO_SAMPLEDIR] --bind [PATH_TO_DIRS_TO_INCLUDE] --genomedir [PATH_TO_GENOMEFILES] --singularity [PATH_TO_SINGULARITY_IMAGE] --outputdir [OUTPUT_COUNTFILES]` 
+
+```
+--samples                     The samples directory should have diretories 
+                              with name of the sample and the fastq files in every 
+                              sample dir -> Samples/sample/*fastq.gz
+                              
+--bind                        Path to which directories you want to include 
+                              in your singularity (should be atleast samples directory and output) 
+                              
+--genomedir                   Path to your genome fasta and gtf file and index files
+
+--singularity                 Path to the singularity image
+
+--outputdir                   Path to output from HTSeq-count, the script 
+                              will create a directory called "results" in this path
+
+```
 
 
 
