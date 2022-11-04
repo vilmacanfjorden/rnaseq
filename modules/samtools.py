@@ -5,7 +5,7 @@ import os
 
 # Samtools index
 def samtools(args):
-    cmd = ["singularity", "run", "--bind", args.bind, args.singularity, "/usr/miniconda3/bin/samtools", "index", "Aligned.sortedByCoord.out.bam"]
+    cmd = ["singularity", "run", "--userns", "--bind", args.bind, args.singularity, "/usr/miniconda3/bin/samtools", "index", "Aligned.sortedByCoord.out.bam"]
 
     # Index bam file
     print("Indexing bamfiles...")
