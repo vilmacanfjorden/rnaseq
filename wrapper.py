@@ -1,6 +1,10 @@
 import argparse
 import glob
 import os
+from time import time
+import datetime
+from functools import wraps
+
 
 # Wrapper for STAR alignment, HTseq-counts and DESeq2
 import modules.alignment as align
@@ -9,22 +13,48 @@ import modules.count as count
 import modules.merge_counts as mc
 
 
+# Time decorator
+def timing(function):
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+        now = datetime.datetime.now()
+        start = time()
+        result = function(*args, **kwargs)
+        end = time()
+        fh = open("time.log", "a")
+        lines_of_text = now.strftime("%Y-%m-%d %H:%M") + "\n" \
+                + os.path.basename(os.getcwd()) + "\n" \
+                + "Function: " \
+                + function.__name__ + "\n" \
+                + "Elapsed time: {}".format(end-start) \
+                + " seconds \n" \
+                + "********************************************** \n" 
+        fh.writelines(lines_of_text)
+        fh.close()
+        return result
+    return wrapper
+
+
 # STAR alignment
+@timing
 def alignment(args,f):
     align.alignment(args,f)
 
 
 # Samtools index
+@timing
 def index(args):
     sam.samtools(args)
 
 
 # HTseq count
+@timing
 def counts(args,f):
     count.count(args,f)
 
 
 # Merge count files
+@timing
 def merge_counts(args):
     mc.merge_counts(args)  # Merge the count files for prep to DESeq2
 
