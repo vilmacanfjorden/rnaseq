@@ -1,0 +1,700 @@
+---
+title: "Bulk RNA-seq Analysis using DESeq2"
+author: "Manuel Luna and Vilma Canfjorden"
+output:
+  pdf_document: default
+  html_document:
+    self_contained: no
+---
+
+``` {r, include=FALSE}
+# Specify variables
+count_file <- "new_counts.txt"
+annotation_file <- "G22-038_annotation_not_imatinib.txt"
+control_name <- "DMSO"
+design_parameter <- "Treatment" #How to model the samples to measure the effect of the conditions
+pca1 <- "Treatment"
+pca2 <- "Cell_line"
+mean_expression <- "mean_expression_MLS-1765.pdf"
+xlsx_file <- "G22-038_MLS-1765_genelist.xlsx"
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+par(mar=c(5,5,0,0))
+```
+
+```{r, include=FALSE}
+
+if (!require("pacman")) install.packages("pacman") # to install/load packages nicely - only if needed
+
+pacman::p_load("gplots", "msigdbr","clusterProfiler","Rsubread","DESeq2","biomaRt","ggplot2","genefilter","RColorBrewer","superheat","EnsDb.Hsapiens.v75","dplyr","reshape2","ggrepel") 
+
+#install.packages("BiocManager")
+#BiocManager::install(c("Rsubread", "DESeq2", "biomaRt", "genefilter", "RColorBrewer", "superheat","EnsDb.Hsapiens.v75","dplyr","reshape2","ggrepel"), update=TRUE, ask = FALSE)
+
+#BiocManager::install("clusterProfiler")
+
+```
+
+## RNA-seq pipeline
+
+Create a feature count matrix based on the alignment files. Make sure to use the right feature annotation for the genome you use (hg19 here).
+```{r, include=FALSE}
+#install.packages("BiocManager")
+#BiocManager::install(c("Rsubread", "DESeq2", "biomaRt", "genefilter", "RColorBrewer", "superheat","EnsDb.Hsapiens.v75","dplyr","reshape2","ggrepel"), update=TRUE, ask = FALSE)
+# 
+ library(Rsubread)
+ library(DESeq2)
+ library(biomaRt)
+ library(gplots)
+ library(ggplot2)
+ library(genefilter)
+ library(RColorBrewer)
+ library(superheat)
+ library(EnsDb.Hsapiens.v75)
+ library(dplyr)
+ library(reshape2)
+ library(ggrepel)
+ library(xlsx)
+
+```
+
+```{r, include=FALSE}
+
+getwd()
+cts <- read.csv(count_file,sep=" ", header = TRUE, row.names = "ENSEMBL_ID")
+coldata <- read.table(annotation_file, sep = "\t", header = TRUE)
+
+
+# Get gene symbols
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", host = "uswest.ensembl.org")
+
+# Retrieve mitochondrial gene ENSEMBL IDs
+genes_data <- genes(EnsDb.Hsapiens.v75, columns = c("gene_id"), filter = ~ seq_name == "MT")
+mito.genes <- genes_data$gene_id
+```
+
+```{r, echo=FALSE, message=FALSE}
+# Retrieve mitochindrial genes- from our count matrix? 
+mito.expression <- cts[as.character(rownames(cts)) %in% mito.genes,]
+
+# Convert to long format using data.table package function melt - Counts per mito gene per sample
+mito.expression <- melt(mito.expression, 
+                        variable.name = "geneID", 
+                        value.name = "mitocounts")
+# Set 0 read counts to 0.5, to ensure log2 does not return infinity?
+mito.expression$mitocounts[mito.expression$mitocounts == 0] <- 0.5
+# Log2 transform expression
+mito.expression$log2expression <- log2(mito.expression$mitocounts)
+
+# Plot mitochondrial gene expression by sample
+fill <- "#4271AE"
+line <- "#1F3552"
+
+p <- ggplot(mito.expression, aes(x=geneID, y=log2expression)) + 
+  geom_boxplot(fill = fill, colour = line) +
+  theme_bw() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_jitter() + labs(title = "Mitochondrial gene expression")+  xlab(label = "Sample ID")
+  
+plot(p)
+```
+
+
+```{r, echo=FALSE}
+
+# Change column names to actual sample names
+colnames(cts) <- coldata$Sample_ID
+
+# Filter out ENSEMBL IDs with no HGNC match - want to change to real gene name- filter out those sequences/given id that does not match any real gene name
+
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", host = "uswest.ensembl.org")
+
+gene_names <- getBM(attributes=c('ensembl_gene_id','hgnc_symbol'),
+                    filters = 'ensembl_gene_id',
+                    values = as.character(rownames(cts)), mart = ensembl)
+
+gene_names<-gene_names[! duplicated(gene_names$ensembl_gene_id),]
+
+gene_names<-gene_names[! duplicated(gene_names$hgnc_symbol),]
+
+rownames(gene_names)<-gene_names$ensembl_gene_id
+
+gene_names$ensembl_gene_id<-NULL
+
+keep<-rownames(cts) %in% rownames(gene_names)
+
+cts<-cts[keep,]
+
+cts<-merge(cts, gene_names, by=0)
+
+cts[cts==""]<-NA
+
+cts<-na.omit(cts)
+
+genes_ids<-cts[,c("hgnc_symbol","Row.names")]
+
+rownames(cts)<-cts$hgnc_symbol
+
+cts$Row.names<-NULL
+
+cts$hgnc_symbol<-NULL
+
+keep <- rowMeans(cts) >= 3  #To avoid that the gene is expressed 10 in one and 0 for the rest
+cts <- cts[keep,]
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=TRUE, results="hide"}
+
+## Define the DESeq object. All Cell lines
+dds_data <- DESeqDataSetFromMatrix(countData = as.matrix(cts),
+                                  colData = coldata,
+                                  design = ~ Treatment)  #How to model the samples to measure the effect of the conditions 
+
+
+## By default the first group in the coldata object is used as control, if this is not correct
+## set the control manually:
+dds_data$Treatment <- relevel(dds_data$Treatment, ref = "DMSO")
+
+
+## Perform differential expression analysis using DESeq2
+dds_data <- DESeq(dds_data)
+colnames(dds_data) <- coldata$Sample_ID
+
+# Contrasts
+resultsNames(dds_data)
+
+#res_imatinib <- results(dds_data, contrast=c("Treatment", "Imatinib", "DMSO")) #MLS set as control)
+res_AZD <- results(dds_data, contrast=c("Treatment", "AZD", "DMSO"))
+res_PAN_AZD <- results(dds_data, contrast=c("Treatment", "PAN-AZD", "DMSO"))
+res_PANO <- results(dds_data, contrast=c("Treatment", "PANO", "DMSO"))
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=TRUE, results="hide"}
+
+plotDispEsts( dds_data, ylim = c(1e-5, 1e1) )
+
+pdf(file=mean_expression)
+superheat(assay(dds_data), scale=T, pretty.order.rows = TRUE, pretty.order.cols = FALSE, bottom.label.text.size = 1, bottom.label.text.angle = 90,
+          bottom.label.text.alignment = "right",left.label = 'none', title = "Mean expression", title.size=7, legend=TRUE, heat.na.col = "grey" )
+dev.off()
+
+
+## Log transfrom the output
+rld <- rlogTransformation(dds_data)
+```
+
+## Summary plots
+
+```{r, echo=FALSE, warning=FALSE, include=TRUE}
+print("Principal components biplot on variance stabilized data, color-coded by group")
+
+# Subsets
+#rld.imatinib <- rld[ , rld$Treatment %in% c("Imatinib", "DMSO") ]
+rld.azd <- rld[ , rld$Treatment %in% c("AZD", "DMSO") ]
+rld.panazd <- rld[ , rld$Treatment %in% c("PAN-AZD", "DMSO") ]
+rld.pano <- rld[ , rld$Treatment %in% c("PANO", "DMSO") ]
+
+#PCA_imatinib <- plotPCA(rld.imatinib, intgroup=c("Treatment"), ntop=10000, returnData=T)  # top 10000 variable genes
+PCA_azd <- plotPCA(rld.azd, intgroup=c("Treatment"), ntop=10000, returnData=T)  # top 10000 variable genes
+PCA_panazd <- plotPCA(rld.panazd, intgroup=c("Treatment"), ntop=10000, returnData=T)  # top 10000 variable genes
+PCA_pano <- plotPCA(rld.pano, intgroup=c("Treatment"), ntop=10000, returnData=T)  # top 10000 variable genes
+
+#png("PCA_Imatinib.png", width = 10000, height = 7000, res = 1300)
+#p<-ggplot(PCA_imatinib, aes(x=PC1,y=PC2,color=Treatment))+theme_bw() + geom_point() + ggtitle("MLS-1765") + theme(plot.title = element_text(hjust = 0.5)) + theme(legend.title = element_text(), panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+#print(p)
+#dev.off()
+
+png("PCA_AZD.png", width = 10000, height = 7000, res = 1300)
+p<-ggplot(PCA_azd, aes(x=PC1,y=PC2,color=Treatment))+theme_bw() + geom_point() + ggtitle("MLS-1765") + theme(plot.title = element_text(hjust = 0.5)) + theme(legend.title = element_text(), panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+print(p)
+dev.off()
+
+png("PCA_PAN-AZD.png", width = 10000, height = 7000, res = 1300)
+p<-ggplot(PCA_panazd, aes(x=PC1,y=PC2,color=Treatment))+theme_bw() + geom_point() + ggtitle("MLS-1765") + theme(plot.title = element_text(hjust = 0.5)) + theme(legend.title = element_text(), panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+print(p)
+dev.off()
+
+png("PCA_PANO.png", width = 10000, height = 7000, res = 1300)
+p<-ggplot(PCA_pano, aes(x=PC1,y=PC2,color=Treatment))+theme_bw() + geom_point() + ggtitle("MLS-1765") + theme(plot.title = element_text(hjust = 0.5)) + theme(legend.title = element_text(), panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+print(p)
+dev.off()
+
+#Testa olika antal variable genes för att se hur brus påverkar resultatet och när systemet stabiliseras- gener som varierar mycket ar de som orsakar skillnader mellan olika prov- intressant!
+
+print("PCA top 10000 variable genes")
+data4 <- plotPCA(rld, intgroup=c(pca1, pca2), ntop=10000)
+plot(data4, main = "CA, top 10000")
+
+
+print("Principal component analysis clustering, all genes included")
+
+# Another way of plotting the PCA
+data5 <- plotPCA(rld, intgroup=c("Treatment"), nrow(rld), returnData=T) # number of variable genes the same as number of elements of one row of rld
+
+data4 <- plotPCA(rld, intgroup=c(pca1, pca2), ntop=10000, returnData=T)  # top 500 variable genes
+
+png("PCA_all.png", width = 10000, height = 7000, res = 1300)
+p<-ggplot(data5, aes(x=PC1,y=PC2, color=Treatment))+theme_bw() + geom_point() + ggtitle("MLS-1765") + theme(plot.title = element_text(hjust = 0.5)) + theme(legend.title = element_text(), panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+print(p)
+dev.off()
+
+pdf("PCA_all.pdf", width = 10, height = 7)
+p<-ggplot(data4, aes(x=PC1,y=PC2,color=Treatment, shape=Cell_line))+theme_bw() + geom_point() + ggtitle("MLS-1765") + theme(plot.title = element_text(hjust = 0.5)) + theme(legend.title = element_text(), panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+print(p)
+dev.off()
+
+## Plot 3D PCA
+##library(genefilter)
+#ntop <- 500
+#rv <- rowVars(assay(rld))
+#select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+#mat <- t( assay(rld)[select, ] )
+#pc <- prcomp(mat)
+
+#install.packages("pca3d")
+#library(pca3d)
+#pca3d(pc, components =1:3, show.labels = TRUE)
+```
+
+```{r, echo=FALSE, warning=FALSE, include=TRUE}
+#### https://www.biostars.org/p/333436/
+# https://plotly.com/python/pca-visualization/
+#plotPCA.san <- function (object, intgroup = "Treatment", ntop = 500, returnData = FALSE) 
+#{
+returnData = FALSE
+ntop <- 500
+intgroup <- "Treatment"
+  rv <- rowVars(assay(rld))
+  select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, 
+                                                     length(rv)))]
+  pca <- prcomp(t(assay(rld)[select, ]))
+  percentVar <- pca$sdev^2/sum(pca$sdev^2)
+  if (!all(intgroup %in% names(colData(rld)))) {
+    stop("the argument 'intgroup' should specify columns of colData(dds)")
+  }
+  intgroup.df <- as.data.frame(colData(rld)[, intgroup, drop = FALSE])
+  group <- if (length(intgroup) > 1) {
+    factor(apply(intgroup.df, 1, paste, collapse = " : "))
+  } else {
+    colData(rld)[[intgroup]]
+  }
+
+  ## Select the PCAs and percentVar that you like instead of 1 and 2
+  d <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], PC3 = pca$x[, 3], group = "Treatment", 
+                  intgroup.df, name = colData(rld)[,1])
+  if (returnData) {
+    attr(d, "percentVar") <- percentVar[1:2]
+    return(d)
+  }
+   #ggplot(data = d, aes_string(x = "PC1", y = "PC2", z = "PC3", color = "group", label = "name")) + geom_point(size = 3) + xlab(paste0("PC1: ", round(percentVar[1] * 100), "% variance")) + ylab(paste0("PC2: ", round(percentVar[2] * 100), "% variance")) + zlab(paste0("PC3: ", round(percentVar[3] * 100), "% variance")) + coord_fixed() + geom_text_repel(size=3) 
+
+# Write to text file that will be used as input t plotly script
+write.table((d), sep="\t", "deseq2_pc3.txt", row.names=F, quote=F)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=TRUE, results="hide"}
+
+
+print("Heatmap of the 50 top variable genes across all samples")
+
+pdf(file="heatmap.pdf") #Saves heatmap as a pdf
+
+topVarGenes <- head( order( rowVars( assay(rld) ), decreasing=TRUE ), 50 )
+
+heatmap1 <- heatmap.2( assay(rld)[ topVarGenes, ], scale="row", cexRow=0.4, cexCol=0.4,
+           trace="none", dendrogram="column", hclustfun = hclust,
+           col = colorRampPalette( rev(brewer.pal(9, "RdBu")) )(255))
+#png("heatmap.png", width = 10000, height = 7000, res = 1300) #nowork
+
+dev.off()
+
+
+```
+
+# Retrieve results
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=TRUE, results="hide"}
+
+# Imatinib results
+#res_imatinib_df <- as.data.frame(res_imatinib)
+#hist(res_imatinib_df$padj, breaks=40, col = "grey",xlab = "P-adjusted Value", main = paste("Distribution of padj-values on the DE results control vs imatinib"))
+#df_imatinib<- data.frame(res_imatinib_df$baseMean,res_imatinib_df$log2FoldChang,res_imatinib_df$padj<0.05)
+#plotMA(df_imatinib, ylim=c(-8,8), main=paste("log2FoldChange vs mean expression control vs imatinib"))
+
+# AZD results
+res_AZD_df <- as.data.frame(res_AZD)
+hist(res_AZD_df$padj, breaks=40, col = "grey",xlab = "P-adjusted Value", main = paste("Distribution of padj-values on the DE results control vs AZD"))
+df_AZD<- data.frame(res_AZD_df$baseMean,res_AZD_df$log2FoldChang,res_AZD_df$padj<0.05)
+plotMA(df_AZD, ylim=c(-8,8), main=paste("log2FoldChange vs mean expression control vs AZD"))
+
+# PAN_AZD results
+res_PAN_AZD_df <- as.data.frame(res_PAN_AZD)
+hist(res_PAN_AZD_df$padj, breaks=40, col = "grey",xlab = "P-adjusted Value", main = paste("Distribution of padj-values on the DE results control vs PAN-AZD"))
+df_PAN_AZD<- data.frame(res_PAN_AZD_df$baseMean,res_PAN_AZD_df$log2FoldChang,res_PAN_AZD_df$padj<0.05)
+plotMA(df_PAN_AZD, ylim=c(-8,8), main=paste("log2FoldChange vs mean expression control vs PAN-AZD"))
+
+# PANO results
+res_PANO_df <- as.data.frame(res_PANO)
+hist(res_PANO_df$padj, breaks=40, col = "grey",xlab = "P-adjusted Value", main = paste("Distribution of padj-values on the DE results control vs PANO"))
+df_PANO<- data.frame(res_PANO_df$baseMean,res_PANO_df$log2FoldChang,res_PANO_df$padj<0.05)
+plotMA(df_PANO, ylim=c(-8,8), main=paste("log2FoldChange vs mean expression control vs PANO"))
+```
+
+# Textfiles for genes
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=TRUE, results="hide"}
+
+# Imatinib results
+#sign_imatinib <- data.frame(row.names(res_imatinib_df), res_imatinib_df$baseMean, res_imatinib_df$log2FoldChange, res_imatinib_df$pvalue, res_imatinib_df$padj)
+#colnames(sign_imatinib) <- c("hgnc_IDs", "mean", "log2FoldChange", "pvalue", "padj")
+
+# p-value
+#sign_imatinib <- sign_imatinib[sign_imatinib$padj < 0.05,]
+#sign_imatinib <- na.omit(sign_imatinib)
+
+# Fold-change
+#sign_imatinib <- sign_imatinib[sign_imatinib$log2FoldChange <=-1 | sign_imatinib$log2FoldChange >=1 ,]
+#sign_imatinib <- sign_imatinib[order(sign_imatinib$padj),]
+#write.table(sign_imatinib, paste("significant_genes_MLS-1765_controlvsImatinib.txt"), sep = "\t",row.names = FALSE)
+
+#assign(paste("imatinib_signgenes.all"),sign_imatinib)
+#assign(paste("imatinib_signgenes.up"), sign_imatinib[sign_imatinib$log2FoldChange >= 1,])
+#assign(paste("imatinib_signgenes.down"), sign_imatinib[sign_imatinib$log2FoldChange <= -1,])
+
+# AZD results
+sign_AZD <- data.frame(row.names(res_AZD_df), res_AZD_df$baseMean, res_AZD_df$log2FoldChange, res_AZD_df$pvalue, res_AZD_df$padj)
+colnames(sign_AZD) <- c("hgnc_IDs", "mean", "log2FoldChange", "pvalue", "padj")
+
+# p-value
+sign_AZD <- sign_AZD[sign_AZD$padj < 0.05,]
+sign_AZD <- na.omit(sign_AZD)
+
+# Fold-change
+sign_AZD <- sign_AZD[sign_AZD$log2FoldChange <=-1 | sign_AZD$log2FoldChange >=1 ,]
+sign_AZD <- sign_AZD[order(sign_AZD$padj),]
+write.table(sign_AZD, paste("significant_genes_MLS-1765_controlvsAZD.txt"), sep = "\t",row.names = FALSE)
+
+assign(paste("azd_signgenes.all"),sign_AZD)
+assign(paste("azd_signgenes.up"), sign_AZD[sign_AZD$log2FoldChange >= 1,])
+assign(paste("azd_signgenes.down"), sign_AZD[sign_AZD$log2FoldChange <= -1,])
+
+# PAN_AZD results
+sign_PAN_AZD <- data.frame(row.names(res_PAN_AZD_df), res_PAN_AZD_df$baseMean, res_PAN_AZD_df$log2FoldChange, res_PAN_AZD_df$pvalue, res_PAN_AZD_df$padj)
+colnames(sign_PAN_AZD) <- c("hgnc_IDs", "mean", "log2FoldChange", "pvalue", "padj")
+
+# p-value
+sign_PAN_AZD <- sign_PAN_AZD[sign_PAN_AZD$padj < 0.05,]
+sign_PAN_AZD <- na.omit(sign_PAN_AZD)
+
+# Fold-change
+sign_PAN_AZD <- sign_PAN_AZD[sign_PAN_AZD$log2FoldChange <=-1 | sign_PAN_AZD$log2FoldChange >=1 ,]
+sign_PAN_AZD <- sign_PAN_AZD[order(sign_PAN_AZD$padj),]
+write.table(sign_PAN_AZD, paste("significant_genes_MLS-1765_controlvsPAN-AZD.txt"), sep = "\t",row.names = FALSE)
+
+assign(paste("panazd_signgenes.all"),sign_PAN_AZD)
+assign(paste("panazd_signgenes.up"), sign_PAN_AZD[sign_PAN_AZD$log2FoldChange >= 1,])
+assign(paste("panazd_signgenes.down"), sign_PAN_AZD[sign_PAN_AZD$log2FoldChange <= -1,])
+
+# PANO results
+sign_PANO <- data.frame(row.names(res_PANO_df), res_PANO_df$baseMean, res_PANO_df$log2FoldChange, res_PANO_df$pvalue, res_PANO_df$padj)
+colnames(sign_PANO) <- c("hgnc_IDs", "mean", "log2FoldChange", "pvalue", "padj")
+
+# p-value
+sign_PANO <- sign_PANO[sign_PANO$padj < 0.05,]
+sign_PANO <- na.omit(sign_PANO)
+
+# Fold-change
+sign_PANO <- sign_PANO[sign_PANO$log2FoldChange <=-1 | sign_PANO$log2FoldChange >=1 ,]
+sign_PANO <- sign_PANO[order(sign_PANO$padj),]
+write.table(sign_PANO, paste("significant_genes_MLS-1765_controlvsPANO.txt"), sep = "\t",row.names = FALSE)
+
+assign(paste("pano_signgenes.all"),sign_PANO)
+assign(paste("pano_signgenes.up"), sign_PANO[sign_PANO$log2FoldChange >= 1,])
+assign(paste("pano_signgenes.down"), sign_PANO[sign_PANO$log2FoldChange <= -1,])
+
+```
+
+```{r}
+# Volcano plots
+
+# Imatinib
+# Create a column to indicate which genes to label
+#res_imatinib_df$genes <- rownames(res_imatinib_df)
+#res_imatinib_df <- res_imatinib_df %>% arrange(padj) %>% mutate(genelabels = "")
+
+#res_imatinib_df$genelabels[1:10] <- paste(res_imatinib_df$genes[1:10],res_imatinib_df$gene_type, sep=":")
+
+#res_imatinib_df <- res_imatinib_df %>%
+ # mutate(gene_type = case_when(log2FoldChange >= 1 & pvalue <= 0.05 ~ "up",
+#                               log2FoldChange <= -1 & pvalue <= 0.05 ~ "down",
+#                               TRUE ~ "ns"))   
+
+
+#res_imatinib_df$genelabels <- ifelse(res_imatinib_df$log2FoldChange >= 1 & res_imatinib_df$padj <= 0.05 | res_imatinib_df$log2FoldChange <= -1 & res_imatinib_df$padj <= 0.05, res_imatinib_df$genes, NA)
+
+# Obtain gene_type counts          
+#res_imatinib_df %>%
+#  count(gene_type)
+
+#res_imatinib_df %>%
+#  distinct(gene_type) %>%
+#  pull()
+
+#cols <- c("up" = "yellow", "down" = "purple", "ns" = "grey")
+#sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+#alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+#png("MLS_1765_imatinib_volcano.png", width = 10000, height = 7000, res = 1300)
+
+#final_plot <- ggplot(data = res_imatinib_df,
+#       aes(x = log2FoldChange,
+#           y = -log10(pvalue), label=genelabels)) + 
+#  geom_point(aes(colour = gene_type), 
+#             alpha = 0.2, 
+#             shape = 16,
+#             size = 1) + 
+#  geom_hline(yintercept = -log10(0.05),
+#             linetype = "dashed") + 
+#  geom_vline(xintercept = c(log2(0.5), log2(2)),
+#             linetype = "dashed") +
+#  scale_colour_manual(values = cols) + 
+#  scale_x_continuous(breaks = c(seq(-10, 10, 2)),     
+#                     limits = c(-10, 10)) +
+#  geom_text_repel() +
+#  labs(title = "MLS-1765 Imatinib",
+#       x = "log2(fold change)",
+#       y = "-log10(adjusted P-value)",
+#       colour = "Expression \nchange") +
+#  theme_bw() + # Select theme with a white background  
+#  theme(panel.border = element_rect(colour = "black", fill = NA, size= 0.5),    
+#        panel.grid.minor = element_blank(),
+#        panel.grid.major = element_blank()) 
+#print(final_plot)
+#dev.off()
+
+# AZD
+# Create a column to indicate which genes to label
+res_AZD_df$genes <- rownames(res_AZD_df)
+res_AZD_df <- res_AZD_df %>% arrange(padj) %>% mutate(genelabels = "")
+
+res_AZD_df$genelabels[1:10] <- res_AZD_df$genes[1:10]
+
+res_AZD_df <- res_AZD_df %>%
+  mutate(gene_type = case_when(log2FoldChange >= 1 & pvalue <= 0.05 ~ "up",
+                               log2FoldChange <= -1 & pvalue <= 0.05 ~ "down",
+                               TRUE ~ "ns"))   
+
+
+# Obtain gene_type counts          
+res_AZD_df %>%
+  count(gene_type)
+
+res_AZD_df %>%
+  distinct(gene_type) %>%
+  pull()
+
+cols <- c("up" = "yellow", "down" = "purple", "ns" = "grey")
+sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+png("MLS-1765_azd_volcano.png", width = 10000, height = 7000, res = 1300)
+
+final_plot <- ggplot(data = res_AZD_df,
+       aes(x = log2FoldChange,
+           y = -log10(pvalue), label=genelabels)) + 
+  geom_point(aes(colour = gene_type), 
+             alpha = 0.2, 
+             shape = 16,
+             size = 1) + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(log2(0.5), log2(2)),
+             linetype = "dashed") +
+  scale_colour_manual(values = cols) + 
+  scale_x_continuous(breaks = c(seq(-10, 10, 2)),     
+                     limits = c(-10, 10)) +
+  geom_text_repel() +
+  labs(title = "MLS-1765 AZD",
+       x = "log2(fold change)",
+       y = "-log10(adjusted P-value)",
+       colour = "Expression \nchange") +
+  theme_bw() + # Select theme with a white background  
+  theme(panel.border = element_rect(colour = "black", fill = NA, size= 0.5),    
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank()) 
+print(final_plot)
+dev.off()
+
+# PAN-AZD
+# Create a column to indicate which genes to label
+res_PAN_AZD_df$genes <- rownames(res_PAN_AZD_df)
+res_PAN_AZD_df <- res_PAN_AZD_df %>% arrange(padj) %>% mutate(genelabels = "")
+
+res_PAN_AZD_df$genelabels[1:10] <- res_PAN_AZD_df$genes[1:10]
+
+res_PAN_AZD_df <- res_PAN_AZD_df %>%
+  mutate(gene_type = case_when(log2FoldChange >= 1 & pvalue <= 0.05 ~ "up",
+                               log2FoldChange <= -1 & pvalue <= 0.05 ~ "down",
+                               TRUE ~ "ns"))   
+
+
+# Obtain gene_type counts          
+res_PAN_AZD_df %>%
+  count(gene_type)
+
+res_PAN_AZD_df %>%
+  distinct(gene_type) %>%
+  pull()
+
+cols <- c("up" = "yellow", "down" = "purple", "ns" = "grey")
+sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+png("MLS-1765_pan-azd_volcano.png", width = 10000, height = 7000, res = 1300)
+
+final_plot <- ggplot(data = res_PAN_AZD_df,
+       aes(x = log2FoldChange,
+           y = -log10(pvalue), label=genelabels)) + 
+  geom_point(aes(colour = gene_type), 
+             alpha = 0.2, 
+             shape = 16,
+             size = 1) + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(log2(0.5), log2(2)),
+             linetype = "dashed") +
+  scale_colour_manual(values = cols) + 
+  scale_x_continuous(breaks = c(seq(-10, 10, 2)),     
+                     limits = c(-10, 10)) +
+  geom_text_repel() +
+  labs(title = "MLS-1765 PAN-AZD",
+       x = "log2(fold change)",
+       y = "-log10(adjusted P-value)",
+       colour = "Expression \nchange") +
+  theme_bw() + # Select theme with a white background  
+  theme(panel.border = element_rect(colour = "black", fill = NA, size= 0.5),    
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank()) 
+print(final_plot)
+dev.off()
+
+# PANO
+# Create a column to indicate which genes to label
+res_PANO_df$genes <- rownames(res_PANO_df)
+res_PANO_df <- res_PANO_df %>% arrange(padj) %>% mutate(genelabels = "")
+
+res_PANO_df$genelabels[1:10] <- res_PANO_df$genes[1:10]
+
+res_PANO_df <- res_PANO_df %>%
+  mutate(gene_type = case_when(log2FoldChange >= 1 & pvalue <= 0.05 ~ "up",
+                               log2FoldChange <= -1 & pvalue <= 0.05 ~ "down",
+                               TRUE ~ "ns"))   
+
+
+# Obtain gene_type counts          
+res_PANO_df %>%
+  count(gene_type)
+
+res_PANO_df %>%
+  distinct(gene_type) %>%
+  pull()
+
+cols <- c("up" = "yellow", "down" = "purple", "ns" = "grey")
+sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+png("MLS-1765_pano_volcano.png", width = 10000, height = 7000, res = 1300)
+
+final_plot <- ggplot(data = res_PANO_df,
+       aes(x = log2FoldChange,
+           y = -log10(pvalue), label=genelabels)) + 
+  geom_point(aes(colour = gene_type), 
+             alpha = 0.2, 
+             shape = 16,
+             size = 1) + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(log2(0.5), log2(2)),
+             linetype = "dashed") +
+  scale_colour_manual(values = cols) + 
+  scale_x_continuous(breaks = c(seq(-10, 10, 2)),     
+                     limits = c(-10, 10)) +
+  geom_text_repel() +
+  labs(title = "MLS-1765 PANO",
+       x = "log2(fold change)",
+       y = "-log10(adjusted P-value)",
+       colour = "Expression \nchange") +
+  theme_bw() + # Select theme with a white background  
+  theme(panel.border = element_rect(colour = "black", fill = NA, size= 0.5),    
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank()) 
+print(final_plot)
+dev.off()
+```
+
+# Save gene lists to excel
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=TRUE, results="hide"}
+
+# Excel document with gene lists
+file <- xlsx_file
+wb <- createWorkbook(type = "xlsx") #create a workbook
+#sheet1 <- createSheet(wb, sheetName = "control vs Imatinib") #create sheet
+sheet2 <- createSheet(wb, sheetName = "control vs AZD") #create sheet
+sheet3 <- createSheet(wb, sheetName = "control vs PAN-AZD") #create sheet
+sheet4 <- createSheet(wb, sheetName = "control vs PANO") #create sheet
+columnnames <- c("All regulated genes", "Up-regulated", "Down-regulated")
+
+# Modify contents to add to specific rows and sheets
+
+# Imatinib
+#addDataFrame(imatinib_signgenes.all$hgnc_IDs, sheet1, col.names = FALSE, row.names = FALSE,
+#    startRow = 2, startColumn = 1)
+#addDataFrame(imatinib_signgenes.up$hgnc_IDs, sheet1, col.names = FALSE, row.names = FALSE,
+#    startRow = 2, startColumn = 2)
+#addDataFrame(imatinib_signgenes.down$hgnc_IDs, sheet1, col.names = FALSE, row.names = FALSE,
+#    startRow = 2, startColumn = 3)
+#addDataFrame(t(columnnames), sheet1, col.names = FALSE, row.names = FALSE,
+#    startRow = 1, startColumn = 1)
+
+# AZD
+addDataFrame(azd_signgenes.all$hgnc_IDs, sheet2, col.names = FALSE, row.names = FALSE,
+    startRow = 2, startColumn = 1)
+addDataFrame(azd_signgenes.up$hgnc_IDs, sheet2, col.names = FALSE, row.names = FALSE,
+    startRow = 2, startColumn = 2)
+addDataFrame(azd_signgenes.down$hgnc_IDs, sheet2, col.names = FALSE, row.names = FALSE,
+    startRow = 2, startColumn = 3)
+addDataFrame(t(columnnames), sheet2, col.names = FALSE, row.names = FALSE,
+    startRow = 1, startColumn = 1)
+
+# PAN_AZD
+addDataFrame(panazd_signgenes.all$hgnc_IDs, sheet3, col.names = FALSE, row.names = FALSE,
+    startRow = 2, startColumn = 1)
+addDataFrame(panazd_signgenes.up$hgnc_IDs, sheet3, col.names = FALSE, row.names = FALSE,
+    startRow = 2, startColumn = 2)
+addDataFrame(panazd_signgenes.down$hgnc_IDs, sheet3, col.names = FALSE, row.names = FALSE,
+    startRow = 2, startColumn = 3)
+addDataFrame(t(columnnames), sheet3, col.names = FALSE, row.names = FALSE,
+    startRow = 1, startColumn = 1)
+
+# PANO
+addDataFrame(pano_signgenes.all$hgnc_IDs, sheet4, col.names = FALSE, row.names = FALSE,
+    startRow = 2, startColumn = 1)
+addDataFrame(pano_signgenes.up$hgnc_IDs, sheet4, col.names = FALSE, row.names = FALSE,
+    startRow = 2, startColumn = 2)
+addDataFrame(pano_signgenes.down$hgnc_IDs, sheet4, col.names = FALSE, row.names = FALSE,
+    startRow = 2, startColumn = 3)
+addDataFrame(t(columnnames), sheet4, col.names = FALSE, row.names = FALSE,
+    startRow = 1, startColumn = 1)
+
+# save to the same file
+saveWorkbook(wb, file)
+
+```
+
+
+
